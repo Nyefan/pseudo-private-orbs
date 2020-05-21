@@ -1,0 +1,116 @@
+version: 2.1
+description: "An orb for integrating pseudo-private orbs from other git repositories"
+
+orbs:
+  aws-cli: circleci/aws-cli@1.0.0
+
+orb-bucket: &orb-bucket
+  orb-bucket:
+    description: "The name of the S3 bucket containing the pseudo-private orb"
+    type: string
+orb-names: &orb-names
+  orb-names:
+    description: "The name:version of the orbs to be merged; multiple orbs may be separated by whitespace"
+    type: string
+commit-branch: &commit-branch
+  commit-branch:
+    description: "The local branch which the merged orb will be commited to; defaults to 'circleci/${CIRCLE_BRANCH_NAME}'"
+    type: string
+    default: "circleci/${CIRCLE_BRANCH}"
+ppo-name: &ppo-name
+  ppo-name:
+    description: "The name of the local config which the orb should be merged into; defaults to 'ppo.yml'"
+    type: string
+    default: "ppo.yml"
+git-email: &git-email
+  git-email:
+    description: "The user.email used to setup git"
+    type: string
+git-name: &git-name
+  git-user:
+    description: "The user.name used to setup git"
+
+orb-params: &orb-params
+  <<: *orb-bucket
+  <<: *orb-names
+
+repo-params: &repo-params
+  <<: *commit-branch
+  <<: *ppo-name
+
+git-params: &git-params
+  <<: *git-email
+  <<: *git-name
+
+orb-params-passthrough: &orb-params-passthrough
+  orb-bucket: << parameters.orb-bucket >>
+  orb-names: << parameters.orb-names >>
+
+repo-params-passthrough: &repo-params-passthrough
+  commit-branch: << parameters.commit-branch >>
+  ppo-name: << parameters.ppo-name >>
+
+git-params-passthrough: &git-params-passthrough
+  git-email: << parameters.git-email >>
+  git-name: << parameters.git-name >>
+
+commands:
+  setup-git:
+    parameters:
+      <<: *git-params
+    steps:
+      - checkout
+      - run:
+          name: setup-git
+          command: |
+            git config user.email "<<parameters.git-email>>" && \
+            git config user.name "<<parameters.git-name>>"
+  download-orb:
+    parameters:
+      <<: *orb-params
+    steps:
+      - run:
+          name: download-orb
+          command: |
+            mkdir .private-orbs && \
+            cd .private-orbs && \
+            printf '%s\n' << parameters.orb-names >> | tr ':' ' ' |
+              xargs -L1 sh -c 'aws s3 cp s3://<<parameters.orb-bucket>>/$0/$1 $0'
+  merge-orb:
+    parameters:
+      <<: *orb-params
+      <<: *repo-params
+    steps:
+      - run:
+          name: merge-orb
+          command: |
+            mv .circleci/<< parameters.ppo-name >> .circleci/config.yml && \
+            (cd .private-orbs && exec yq merge -ix ../.circleci/config.yml $(sed 's/:[^[:space:]]*//g' \<<< "<< parameters.orb-names >>")) && \
+            git checkout -b << parameters.commit-branch >> && \
+            git add . && \
+            git commit -m "merged orbs from s3://<< parameters.orb-bucket >>: << parameters.orb-names >>" && \
+            git push -f -u origin << parameters.commit-branch >>
+      - run:
+          name: push-tag
+          command: |
+            if [[ ! -z ${CIRCLE_TAG} ]]; then
+              git tag circleci-${CIRCLE_TAG} && git push -f -u origin circleci-${CIRCLE_TAG}
+            fi
+
+jobs:
+  integrate-pseudo-private-orb:
+    docker:
+      - image: circleci/buildpack-deps:focal
+    parameters:
+      <<: *orb-params
+      <<: *repo-params
+    steps:
+      - aws-cli/install
+      - aws-cli/setup
+      - setup-git:
+          <<: *git-params-passthrough
+      - download-orb:
+          <<: *orb-params-passthrough
+      - merge-orb:
+          <<: *orb-params-passthrough
+          <<: *repo-params-passthrough
